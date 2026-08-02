@@ -186,6 +186,9 @@ void DuelClient::StopClient(bool is_exiting) {
 
 		}
 	}
+	// AI launches can outlive a failed/closed connection attempt, so cleanup is
+	// unconditional. WindBot cleanup above retains its existing behavior.
+	mainGame->gBot.ClearAiPlayerProcesses();
 	if(client_thread.joinable())
 		client_thread.join();
 	mainGame->frameSignal.SetNoWait(false);
@@ -1123,6 +1126,7 @@ void DuelClient::HandleSTOCPacketLanAsync(const std::vector<uint8_t>& data) {
 		else
 			mainGame->dInfo.opponames[pkt.pos - mainGame->dInfo.team1] = name;
 		mainGame->stHostPrepDuelist[pkt.pos]->setText(name);
+		mainGame->gBot.NotifyParticipantJoined(name);
 		mainGame->btnHostPrepStart->setVisible(is_host);
 		mainGame->btnHostPrepStart->setEnabled(is_host && CheckReady());
 		break;

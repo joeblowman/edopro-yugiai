@@ -2,6 +2,7 @@
 #include "generic_duel.h"
 #include "netserver.h"
 #include "game.h"
+#include "headless_host.h"
 #include "core_utils.h"
 
 namespace ygo {
@@ -599,7 +600,17 @@ void GenericDuel::TPResult(DuelPlayer* dp, uint8_t tp) {
 	if(host_info.no_shuffle_deck)
 		opt |= ((uint64_t)DUEL_PSEUDO_SHUFFLE);
 	OCG_Player team = { host_info.start_lp, host_info.start_hand, host_info.draw_count };
-	pduel = mainGame->SetupDuel({ { seed[0], seed[1], seed[2], seed[3] }, opt, team, team });
+	if(mainGame) {
+		pduel = mainGame->SetupDuel({ { seed[0], seed[1], seed[2], seed[3] }, opt, team, team });
+	} else {
+		pduel = SetupHeadlessDuelRuntime({ { seed[0], seed[1], seed[2], seed[3] }, opt, team, team });
+	}
+	if(!pduel) {
+		duel_stage = DUEL_STAGE_END;
+		event_del(etimer);
+		NetServer::StopServer();
+		return;
+	}
 	if(!host_info.no_shuffle_deck) {
 		auto rnd = Utils::GetRandomNumberGenerator();
 		IteratePlayers([&rnd](duelist& dueler) {

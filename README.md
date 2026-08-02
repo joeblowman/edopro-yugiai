@@ -11,6 +11,67 @@ This repository is for the game client only. Related Ignis projects:
 - [Canonical card databases collection](https://github.com/ProjectIgnis/BabelCdb)
 - [WindBot Ignite](https://github.com/ProjectIgnis/windbot/)
 
+## Headless Room Hosting CLI
+
+The client supports launching a duel room without opening the GUI:
+
+```bash
+ygopro --host-headless "Name=AI Room Port=7911 Mode=single"
+```
+
+Short flag `-H` is also supported.
+
+Required launch keys:
+- `Name` (room name)
+- `Port` (1-65535)
+- `Mode` (`single`, `match`, `tag`, or `rush`)
+
+Optional launch keys:
+- `Password`
+- `BestOf` (integer >= 1)
+- `ConfigFile` (JSON overrides for host settings)
+
+Arguments can be passed as repeated `Key=Value` tokens after `--host-headless`.
+For backward compatibility, a single quoted payload containing multiple `Key=Value` tokens is still accepted.
+Unsupported keys, duplicate keys, or invalid values fail fast, emit an `ERROR` lifecycle event, and exit non-zero.
+
+### Lifecycle Event Output (stdout JSON Lines)
+
+Headless mode emits one JSON object per line to stdout:
+- `ROOM_STARTED` with `detail.port`
+- `CLIENT_JOINED` with `detail.name` and `detail.seat`
+- `DUEL_STARTED`
+- `DUEL_ENDED` with `detail.winner_seat` (`0`, `1`, or `null`)
+- `ROOM_CLOSED` with `detail.reason` (`duel_ended`, `stopped`, or `error`)
+- `ERROR` with `detail.reason`
+
+Example:
+
+```json
+{"event":"ROOM_STARTED","timestamp":"2026-08-01T12:00:00Z","detail":{"port":7911}}
+{"event":"CLIENT_JOINED","timestamp":"2026-08-01T12:00:05Z","detail":{"name":"[AI]Bot","seat":0}}
+{"event":"DUEL_STARTED","timestamp":"2026-08-01T12:00:10Z","detail":{}}
+{"event":"DUEL_ENDED","timestamp":"2026-08-01T12:05:00Z","detail":{"winner_seat":0}}
+{"event":"ROOM_CLOSED","timestamp":"2026-08-01T12:05:01Z","detail":{"reason":"duel_ended"}}
+```
+
+On `SIGINT`/`SIGTERM`, the host disconnects connected players with a stop reason and emits `ROOM_CLOSED` with reason `stopped`.
+
+### Headless Host Test Command
+
+Run the headless-host regression suite from the repository root:
+
+```bash
+./tests/run_headless_host_tests.sh
+```
+
+This command executes production-code lifecycle checks against a built `ygopro` binary.
+By default it uses `../ProjectIgnis/ygopro`; override with:
+
+```bash
+HEADLESS_HOST_BINARY=/absolute/path/to/ygopro ./tests/run_headless_host_tests.sh
+```
+
 ## Contributing
 
 Please keep all usage questions and Windows and macOS bug reports on Discord; do not open an issue or pull request for this purpose.

@@ -5,6 +5,8 @@
 #include "epro_thread.h"
 #include "utils.h"
 
+#include <utility>
+
 #if EDOPRO_WINDOWS
 #define real_main edopro_main
 #include "winmain.inl"
@@ -28,6 +30,7 @@ epro::thread::id main_thread_id;
 }
 
 args_t cli_args;
+int headless_host_main(const args_t& args);
 int edopro_main(const args_t& cli_args);
 
 namespace {
@@ -38,6 +41,7 @@ auto GetOption(epro::path_stringview option) {
 		case EPRO_TEXT('m'): return LAUNCH_PARAM::MUTE;
 		case EPRO_TEXT('l'): return LAUNCH_PARAM::CHANGELOG;
 		case EPRO_TEXT('D'): return LAUNCH_PARAM::DISCORD;
+			case EPRO_TEXT('H'): return LAUNCH_PARAM::HOST_HEADLESS;
 		case EPRO_TEXT('u'): return LAUNCH_PARAM::OVERRIDE_UPDATE_URL;
 		case EPRO_TEXT('r'): return LAUNCH_PARAM::REPOS_READ_ONLY;
 		case EPRO_TEXT('c'): return LAUNCH_PARAM::ONLY_CLONE_REPOS;
@@ -47,6 +51,8 @@ auto GetOption(epro::path_stringview option) {
 	}
 	if(option == EPRO_TEXT("i-want-to-be-admin"sv))
 		return LAUNCH_PARAM::WANTS_TO_RUN_AS_ADMIN;
+		if(option == EPRO_TEXT("host-headless"sv))
+			return LAUNCH_PARAM::HOST_HEADLESS;
 	return LAUNCH_PARAM::COUNT;
 }
 
@@ -57,18 +63,32 @@ auto ParseArguments(int argc, epro::path_char* argv[]) {
 		if(parameter.size() < 2)
 			break;
 		if(parameter[0] == EPRO_TEXT('-')) {
-			auto launch_param = GetOption(parameter.substr(1));
+			auto option = parameter.substr(1);
+			if(!option.empty() && option.front() == EPRO_TEXT('-'))
+				option = option.substr(1);
+			auto launch_param = GetOption(option);
 			if(launch_param == LAUNCH_PARAM::COUNT)
 				continue;
 			epro::path_stringview argument;
-			if(i + 1 < argc) {
+			std::vector<epro::path_string> arguments;
+			if(launch_param == LAUNCH_PARAM::HOST_HEADLESS) {
+				while(i + 1 < argc) {
+					const auto* next = argv[i + 1];
+					if(next[0] == EPRO_TEXT('-'))
+						break;
+					++i;
+					arguments.emplace_back(argv[i]);
+				}
+				if(!arguments.empty())
+					argument = arguments.front();
+			} else if(i + 1 < argc) {
 				const auto* next = argv[i + 1];
 				if(next[0] != EPRO_TEXT('-')) {
 					argument = next;
 					i++;
 				}
 			}
-			res[launch_param] = {true,  argument};
+			res[launch_param] = { true, argument, std::move(arguments) };
 			continue;
 		}
 	}
@@ -91,6 +111,8 @@ extern "C" int real_main(int argc, epro::path_char** argv) {
 	(void)sigaction(SIGCHLD, &sa, 0);
 #endif //EDOPRO_POSIX
 	cli_args = ParseArguments(argc, argv);
+	if(cli_args[LAUNCH_PARAM::HOST_HEADLESS].enabled)
+		return headless_host_main(cli_args);
 	if(cli_args[ONLY_CLONE_REPOS].enabled)
 		return repo_cloner_main(cli_args);
 	return edopro_main(cli_args);

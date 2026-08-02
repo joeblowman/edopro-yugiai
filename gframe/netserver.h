@@ -2,6 +2,7 @@
 #define NETSERVER_H
 
 #include <set>
+#include <string_view>
 #include <unordered_map>
 #include "config.h"
 #include "core_utils.h"
@@ -36,6 +37,7 @@ public:
 	static void ServerEchoEvent(bufferevent* bev, short events, void* ctx);
 	static int ServerThread();
 	static void DisconnectPlayer(DuelPlayer* dp);
+	static void DisconnectAllPlayersWithReason(std::wstring_view reason);
 	static void HandleCTOSPacket(DuelPlayer* dp, uint8_t* data, uint32_t len);
 	static void SendPacketToPlayer(DuelPlayer* dp, uint8_t proto) {
 		auto* p = net_server_write;

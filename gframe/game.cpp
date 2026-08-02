@@ -1,4 +1,5 @@
 #include <sstream>
+#include <stdexcept>
 #include <nlohmann/json.hpp>
 #include <irrlicht.h>
 #include "client_updater.h"
@@ -1417,6 +1418,7 @@ void Game::PopulateGameHostWindows() {
 }
 
 void Game::PopulateAIBotWindow() {
+	gBot.aiPlayerEngines = &aiPlayerEngines;
 #if !EDOPRO_ANDROID && !EDOPRO_IOS
 	static constexpr bool showWindbotArgs = true;
 #else
@@ -2088,6 +2090,8 @@ bool Game::MainLoop() {
 		atkdy = (float)sin(atkframe);
 		driver->beginScene(true, true, irr::video::SColor(0, 0, 0, 0));
 		gMutex.lock();
+		if(gBot.UpdatePendingAiPlayers(now))
+			PopupMessage(AI_PLAYER_FAILURE_MESSAGE);
 		if(dInfo.isInDuel) {
 			if(dInfo.isReplay)
 				discord.UpdatePresence(DiscordWrapper::REPLAY);
@@ -2535,6 +2539,74 @@ void Game::RefreshAiDecks() {
 		}
 	} else {
 		ErrorLog("Failed to open WindBot Ignite config json!");
+	}
+
+	// AI-player discovery is intentionally independent from bots.json so legacy
+	// WindBot configurations and their parsing behavior remain unchanged.
+	aiPlayerEngines.clear();
+	FileStream ai_players{ EPRO_TEXT("./WindBot/ai_players.json"), FileStream::in };
+	if(ai_players.good()) {
+		try {
+			nlohmann::json config;
+			ai_players >> config;
+			const auto& entries = config.at("aiPlayers");
+			if(!entries.is_array())
+				throw std::invalid_argument("aiPlayers must be an array");
+
+			for(const auto& obj : entries) {
+				try {
+					AiPlayerEngineEntry entry;
+					entry.label = BufferIO::DecodeUTF8(obj.at("label").get<std::string>());
+					if(entry.label.empty())
+						throw std::invalid_argument("label must not be empty");
+
+					auto read_path = [&obj](const char* key, epro::path_string& destination) {
+						const auto it = obj.find(key);
+						if(it == obj.end())
+							return;
+						const auto value = it->get<std::string>();
+#if defined(UNICODE)
+						destination = BufferIO::DecodeUTF8(value);
+#else
+						destination = value;
+#endif
+					};
+					read_path("executable", entry.launch_args.executable);
+					read_path("interpreter", entry.launch_args.interpreter);
+					read_path("module", entry.launch_args.module);
+					const bool has_executable = !entry.launch_args.executable.empty();
+					const bool has_module_launch = !entry.launch_args.interpreter.empty()
+						&& !entry.launch_args.module.empty();
+					if(!has_executable && !has_module_launch)
+						throw std::invalid_argument("an executable or both interpreter and module are required");
+
+					auto read_wstring = [&obj](const char* key, std::wstring& destination) {
+						const auto it = obj.find(key);
+						if(it != obj.end())
+							destination = BufferIO::DecodeUTF8(it->get<std::string>());
+					};
+					read_wstring("host", entry.launch_args.host);
+					read_wstring("name", entry.launch_args.display_name);
+					read_wstring("deck", entry.launch_args.deck);
+					if(entry.launch_args.host.empty() || entry.launch_args.display_name.empty())
+						throw std::invalid_argument("host and name must not be empty");
+
+					const auto version = obj.find("protocolVersion");
+					if(version != obj.end())
+						entry.launch_args.protocol_version = version->get<uint32_t>();
+					if(entry.launch_args.protocol_version == 0)
+						throw std::invalid_argument("protocolVersion must be greater than zero");
+
+					aiPlayerEngines.push_back(std::move(entry));
+				}
+				catch(const std::exception& e) {
+					ErrorLog("Failed to parse AI player config json entry: {}", e.what());
+				}
+			}
+		}
+		catch(const std::exception& e) {
+			ErrorLog("Failed to load AI player config json: {}", e.what());
+		}
 	}
 }
 void Game::RefreshReplay() {

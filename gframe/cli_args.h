@@ -2,6 +2,7 @@
 #define CLI_ARGS_H
 
 #include <array>
+#include <vector>
 #include "text_types.h"
 
 enum LAUNCH_PARAM {
@@ -9,6 +10,7 @@ enum LAUNCH_PARAM {
 	MUTE,
 	CHANGELOG,
 	DISCORD,
+	HOST_HEADLESS,
 	OVERRIDE_UPDATE_URL,
 	WANTS_TO_RUN_AS_ADMIN,
 	REPOS_READ_ONLY,
@@ -21,6 +23,7 @@ enum LAUNCH_PARAM {
 struct Option {
 	bool enabled{ false };
 	epro::path_stringview argument;
+	std::vector<epro::path_string> arguments;
 };
 
 using args_t = std::array<Option, LAUNCH_PARAM::COUNT>;

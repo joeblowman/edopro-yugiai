@@ -1,4 +1,6 @@
 #include "windbot.h"
+#include <cerrno>
+#include <cstdlib>
 #include "utils.h"
 #include "config.h"
 #if EDOPRO_WINDOWS
@@ -8,9 +10,11 @@
 #include "deck_manager.h"
 #include "porting.h"
 #include <nlohmann/json.hpp>
-#else
+#elif EDOPRO_LINUX || EDOPRO_MACOS
+#include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>
+extern char** environ;
 #endif
 #if !EDOPRO_ANDROID
 #include "Base64.h"
@@ -20,6 +24,74 @@
 #include "logging.h"
 
 namespace ygo {
+
+bool LocalAiProcessHandle::IsRunning() {
+#if EDOPRO_WINDOWS
+	if(value == invalid)
+		return false;
+	if(WaitForSingleObject(value, 0) == WAIT_TIMEOUT)
+		return true;
+	CloseHandle(value);
+	value = invalid;
+	return false;
+#elif EDOPRO_LINUX || EDOPRO_MACOS
+	if(value == invalid)
+		return false;
+	int status{};
+	pid_t result;
+	do {
+		result = waitpid(value, &status, WNOHANG);
+	} while(result < 0 && errno == EINTR);
+	if(result == 0)
+		return true;
+	if(result == value || (result < 0 && errno == ECHILD)) {
+		// The process-wide SIGCHLD handler may win the waitpid race.
+		value = invalid;
+		return false;
+	}
+	if(kill(value, 0) == 0 || errno == EPERM)
+		return true;
+	value = invalid;
+	return false;
+#else
+	return false;
+#endif
+}
+
+void LocalAiProcessHandle::Terminate() {
+	if(!IsRunning())
+		return;
+#if EDOPRO_WINDOWS
+	if(value != invalid) {
+		if(TerminateProcess(value, EXIT_FAILURE) || GetLastError() == ERROR_ACCESS_DENIED)
+			(void)WaitForSingleObject(value, INFINITE);
+		CloseHandle(value);
+	}
+#elif EDOPRO_LINUX || EDOPRO_MACOS
+	if(value != invalid) {
+		const auto pid = value;
+		if(kill(pid, SIGKILL) == 0 || errno == ESRCH) {
+			int status{};
+			while(waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+			}
+		}
+	}
+#endif
+	value = invalid;
+}
+
+void LocalAiProcessHandle::Release() {
+#if EDOPRO_WINDOWS
+	if(value != invalid)
+		CloseHandle(value);
+#elif EDOPRO_LINUX || EDOPRO_MACOS
+	if(value != invalid) {
+		int status{};
+		(void)waitpid(value, &status, WNOHANG);
+	}
+#endif
+	value = invalid;
+}
 
 #if EDOPRO_LINUX || EDOPRO_MACOS
 epro::path_string WindBot::executablePath{};
@@ -119,6 +191,110 @@ WindBot::launch_ret_t WindBot::Launch(int port, epro::wstringview pass, bool cha
 #else
 	return {};
 #endif
+}
+
+namespace {
+#if EDOPRO_WINDOWS
+// Encode one argv element according to the CommandLineToArgvW/MSVCRT rules used
+// by CreateProcess. This preserves whitespace, quotes, and trailing backslashes.
+epro::path_string QuoteWindowsArgument(epro::path_stringview argument) {
+	epro::path_string quoted{ EPRO_TEXT('"') };
+	size_t backslashes = 0;
+	for(const auto character : argument) {
+		if(character == EPRO_TEXT('\\')) {
+			++backslashes;
+			continue;
+		}
+		if(character == EPRO_TEXT('"')) {
+			quoted.append(backslashes * 2 + 1, EPRO_TEXT('\\'));
+			quoted.push_back(character);
+		} else {
+			quoted.append(backslashes, EPRO_TEXT('\\'));
+			quoted.push_back(character);
+		}
+		backslashes = 0;
+	}
+	quoted.append(backslashes * 2, EPRO_TEXT('\\'));
+	quoted.push_back(EPRO_TEXT('"'));
+	return quoted;
+}
+#endif
+}
+
+LocalAiLaunchResult AiPlayerEngineEntry::Launch(int port, epro::wstringview pass, bool chat, int hand, const wchar_t* overridedeck) const {
+	const bool launch_executable = !launch_args.executable.empty();
+	const bool launch_module = !launch_args.interpreter.empty() && !launch_args.module.empty();
+	if(!launch_executable && !launch_module)
+		return { LocalAiLaunchStatus::INVALID_CONFIGURATION, {}, EINVAL };
+
+#if EDOPRO_WINDOWS || EDOPRO_LINUX || EDOPRO_MACOS
+	std::vector<epro::path_string> command;
+	command.reserve(3 + 8);
+	command.emplace_back(launch_executable ? launch_args.executable : launch_args.interpreter);
+	if(!launch_executable) {
+		command.emplace_back(EPRO_TEXT("-m"));
+		command.emplace_back(launch_args.module);
+	}
+	for(const auto& parameter : GetLaunchParameters(port, pass, chat, hand, overridedeck))
+		command.emplace_back(Utils::ToPathString(parameter));
+
+#if EDOPRO_WINDOWS
+	epro::path_string command_line;
+	for(const auto& argument : command) {
+		if(!command_line.empty())
+			command_line.push_back(EPRO_TEXT(' '));
+		command_line.append(QuoteWindowsArgument(argument));
+	}
+
+	STARTUPINFO startup_info{ sizeof(startup_info) };
+	startup_info.dwFlags = STARTF_USESHOWWINDOW;
+	startup_info.wShowWindow = SW_HIDE;
+	PROCESS_INFORMATION process_info{};
+	if(!CreateProcess(command.front().c_str(), command_line.data(), nullptr, nullptr, false, 0,
+	                  nullptr, nullptr, &startup_info, &process_info)) {
+		return { LocalAiLaunchStatus::PROCESS_CREATION_FAILED, {}, GetLastError() };
+	}
+	CloseHandle(process_info.hThread);
+	return { LocalAiLaunchStatus::CREATED, { process_info.hProcess }, 0 };
+#else
+	std::vector<char*> argv;
+	argv.reserve(command.size() + 1);
+	for(auto& argument : command)
+		argv.push_back(argument.data());
+	argv.push_back(nullptr);
+
+	pid_t pid{};
+	const int spawn_error = posix_spawnp(&pid, command.front().c_str(), nullptr, nullptr, argv.data(), environ);
+	if(spawn_error != 0)
+		return { LocalAiLaunchStatus::PROCESS_CREATION_FAILED, {}, static_cast<uint32_t>(spawn_error) };
+	return { LocalAiLaunchStatus::CREATED, { pid }, 0 };
+#endif
+#else
+	(void)port;
+	(void)pass;
+	(void)chat;
+	(void)hand;
+	(void)overridedeck;
+	return { LocalAiLaunchStatus::UNSUPPORTED_PLATFORM, {}, 0 };
+#endif
+}
+
+std::vector<std::string> AiPlayerEngineEntry::GetLaunchParameters(int port, epro::wstringview pass, bool chat, int hand, const wchar_t* overridedeck) const {
+	const auto& args = launch_args;
+	std::vector<std::string> parameters;
+	parameters.reserve(8);
+	parameters.emplace_back(epro::format("Host={}", BufferIO::EncodeUTF8(args.host)));
+	parameters.emplace_back(epro::format("HostInfo={}", BufferIO::EncodeUTF8(pass)));
+	if(overridedeck)
+		parameters.emplace_back(epro::format("DeckFile={}", BufferIO::EncodeUTF8(overridedeck)));
+	else
+		parameters.emplace_back(epro::format("Deck={}", BufferIO::EncodeUTF8(args.deck)));
+	parameters.emplace_back(epro::format("Port={}", port));
+	parameters.emplace_back(epro::format("Version={}", args.protocol_version));
+	parameters.emplace_back(epro::format("name={}", BufferIO::EncodeUTF8(args.display_name)));
+	parameters.emplace_back(epro::format("Chat={}", chat));
+	parameters.emplace_back(epro::format("Hand={}", hand));
+	return parameters;
 }
 
 std::wstring WindBot::GetLaunchParameters(int port, epro::wstringview pass, bool chat, int hand, const wchar_t* overridedeck) const {

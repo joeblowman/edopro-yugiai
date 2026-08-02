@@ -299,6 +299,23 @@ void NetServer::DisconnectPlayer(DuelPlayer* dp) {
 		users.erase(bit);
 	}
 }
+void NetServer::DisconnectAllPlayersWithReason(std::wstring_view reason) {
+	if(users.empty())
+		return;
+
+	STOC_Chat2 system_message{};
+	system_message.type = STOC_Chat2::PTYPE_SYSTEM_ERROR;
+	BufferIO::EncodeUTF16(L"System", system_message.client_name, 20);
+	const auto msg_len = BufferIO::EncodeUTF16(epro::wstringview(reason.data(), reason.size()), system_message.msg, 256);
+
+	for(auto& entry : users) {
+		auto* player = &entry.second;
+		if(!player->bev)
+			continue;
+		NetServer::SendBufferToPlayer(player, STOC_CHAT_2, &system_message, 4 + 40 + (msg_len * 2));
+		bufferevent_flush(player->bev, EV_WRITE, BEV_FLUSH);
+	}
+}
 void NetServer::HandleCTOSPacket(DuelPlayer* dp, uint8_t* data, uint32_t len) {
 	static constexpr ClientVersion serverversion{ EXPAND_VERSION(CLIENT_VERSION) };
 	auto* pdata = data;

@@ -9,14 +9,27 @@
 
 namespace ygo {
 
+WindBotPanel::~WindBotPanel() {
+	ClearAiPlayerProcesses();
+}
+
 int WindBotPanel::CurrentIndex() {
 	int selected = cbBotDeck->getSelected();
 	return selected >= 0 ? cbBotDeck->getItemData(selected) : selected;
 }
 
 int WindBotPanel::CurrentEngine() {
-	int selected = cbBotEngine->getSelected();
-	return selected >= 0 ? cbBotEngine->getItemData(selected) : selected;
+	const auto selection = CurrentEngineSelection();
+	return selection.valid && selection.kind == LocalAiEngineKind::WINDBOT
+		? static_cast<int>(selection.index)
+		: -1;
+}
+
+LocalAiEngineSelection WindBotPanel::CurrentEngineSelection() {
+	const int selected = cbBotEngine->getSelected();
+	if(selected < 0)
+		return {};
+	return DecodeLocalAiEngineItemData(cbBotEngine->getItemData(selected));
 }
 
 void WindBotPanel::Refresh(int filterMasterRule, int lastIndex) {
@@ -41,6 +54,12 @@ void WindBotPanel::Refresh(int filterMasterRule, int lastIndex) {
 	}
 	if(genericEngine) {
 		genericEngineIdx = cbBotEngine->addItem(genericEngine->name.data(), i);
+	}
+	if(aiPlayerEngines) {
+		for(uint32_t aiPlayerIndex = 0; aiPlayerIndex < aiPlayerEngines->size(); ++aiPlayerIndex) {
+			const auto& aiPlayer = (*aiPlayerEngines)[aiPlayerIndex];
+			cbBotEngine->addItem(aiPlayer.label.data(), EncodeAiPlayerEngineItemData(aiPlayerIndex));
+		}
 	}
 	for(auto& file : Utils::FindFiles(DeckManager::GetDeckFolder(), { EPRO_TEXT("ydk") })) {
 		file.erase(file.size() - 4);
@@ -80,6 +99,12 @@ void WindBotPanel::UpdateDescription() {
 }
 
 void WindBotPanel::UpdateEngine() {
+	// Keep an explicitly selected AI player while choosing its override deck.
+	// WindBot and generic-engine auto-selection behavior remains unchanged.
+	if(CurrentEngineSelection().kind == LocalAiEngineKind::AI_PLAYER) {
+		UpdateDescription();
+		return;
+	}
 	int index = CurrentIndex();
 	if(index >= (int)bots.size()) {
 		if(genericEngineIdx != -1)
@@ -92,8 +117,46 @@ void WindBotPanel::UpdateEngine() {
 	UpdateDescription();
 }
 
-bool WindBotPanel::LaunchSelected(int port, epro::wstringview pass) {
+bool WindBotPanel::LaunchSelected(int port, epro::wstringview pass, uint32_t now_ms) {
+	const auto selection = CurrentEngineSelection();
+	if(!selection.valid)
+		return false;
+
 	int index = CurrentIndex();
+	if(selection.kind == LocalAiEngineKind::AI_PLAYER) {
+		if(!aiPlayerEngines || selection.index >= aiPlayerEngines->size())
+			return false;
+
+		const wchar_t* overridedeck = nullptr;
+		std::wstring tmpdeck{};
+		const auto maxsize = static_cast<int>(bots.size() - (genericEngine != nullptr));
+		if(index >= maxsize) {
+			if(index >= 0) {
+				tmpdeck = Utils::ToUnicodeIfNeeded(DeckManager::GetDeckPath(Utils::ToPathString(cbBotDeck->getItem(cbBotDeck->getSelected()))));
+				overridedeck = tmpdeck.data();
+			}
+		} else if(index >= 0) {
+			overridedeck = bots[index].deckfile.data();
+		}
+
+		// Serialize launch and participant notification so a very fast join cannot
+		// arrive before its process record exists.
+		std::lock_guard<std::mutex> process_lock(aiPlayerProcessesMutex);
+		// Allocate tracking storage before process ownership can transfer to us.
+		aiPlayerProcesses.reserve(aiPlayerProcesses.size() + 1);
+		// 1 = scissors, 2 = rock, 3 = paper
+		const auto result = (*aiPlayerEngines)[selection.index].Launch(
+			port, pass, !chkMute->isChecked(), chkThrowRock->isChecked() * 2, overridedeck);
+		if(!result)
+			return false;
+		auto expected_name = (*aiPlayerEngines)[selection.index].launch_args.display_name;
+		// Lobby names are transmitted in a fixed 20-code-unit field (19 + NUL).
+		if(expected_name.size() > 19)
+			expected_name.resize(19);
+		aiPlayerProcesses.push_back({ selection.index, result.process_handle, std::move(expected_name), now_ms });
+		return true;
+	}
+
 	int engine = CurrentEngine();
 	if (index < 0 || engine < 0) return false;
 	const wchar_t* overridedeck = nullptr;
@@ -114,6 +177,57 @@ bool WindBotPanel::LaunchSelected(int port, epro::wstringview pass) {
 		windbotsPids.push_back(res);
 #endif
 	return res;
+}
+
+
+bool WindBotPanel::UpdatePendingAiPlayers(uint32_t now_ms) {
+	std::lock_guard<std::mutex> process_lock(aiPlayerProcessesMutex);
+	bool failed = false;
+	for(auto& process : aiPlayerProcesses) {
+		if(process.failure_reported)
+			continue;
+		if(process.participant_joined) {
+			// Joined AI players are no longer pending, but retaining ownership lets
+			// us reap normal exits and terminate them when the room closes.
+			process.process_handle.IsRunning();
+			continue;
+		}
+		if(process.observed_failure != AiPlayerPendingDecision::WAITING) {
+			if(process.observed_failure == AiPlayerPendingDecision::TIMED_OUT)
+				process.process_handle.Terminate();
+			else
+				process.process_handle.Release();
+			process.failure_reported = true;
+			failed = true;
+			continue;
+		}
+		const auto decision = EvaluateAiPlayerPending(
+			process.process_handle.IsRunning(), false, now_ms - process.launched_at_ms);
+		if(decision != AiPlayerPendingDecision::WAITING) {
+			// Confirm on the next frame so a lobby update already in flight can
+			// correlate this launch before it is reported as failed.
+			process.observed_failure = decision;
+		}
+	}
+	if(failed)
+		deckProperties->setText(AI_PLAYER_FAILURE_MESSAGE.data());
+	return failed;
+}
+
+void WindBotPanel::NotifyParticipantJoined(epro::wstringview name) {
+	std::lock_guard<std::mutex> process_lock(aiPlayerProcessesMutex);
+	const auto index = FindPendingAiPlayerLaunch(aiPlayerProcesses, name);
+	if(index == AI_PLAYER_PROCESS_NOT_FOUND)
+		return;
+	aiPlayerProcesses[index].participant_joined = true;
+	aiPlayerProcesses[index].observed_failure = AiPlayerPendingDecision::WAITING;
+}
+
+void WindBotPanel::ClearAiPlayerProcesses() {
+	std::lock_guard<std::mutex> process_lock(aiPlayerProcessesMutex);
+	for(auto& process : aiPlayerProcesses)
+		process.process_handle.Terminate();
+	aiPlayerProcesses.clear();
 }
 
 std::wstring WindBotPanel::GetParameters(int port, epro::wstringview pass) {

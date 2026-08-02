@@ -10,6 +10,7 @@
 #include "image_manager.h"
 #include "game.h"
 #include "server_lobby.h"
+#include "host_start.h"
 #include "utils_gui.h"
 #include "CGUIFileSelectListBox/CGUIFileSelectListBox.h"
 #include "CGUITTFont/CGUITTFont.h"
@@ -257,10 +258,14 @@ bool MenuHandler::OnEvent(const irr::SEvent& event) {
 					catch(...) {
 						break;
 					}
-					gGameConfig->gamename = mainGame->ebServerName->getText();
-					gGameConfig->serverport = mainGame->ebHostPort->getText();
+					ApplySharedRoomConfig({
+						host_port,
+						mainGame->ebServerName->getText(),
+						L"",
+						false,
+					});
 					mainGame->gBot.Refresh(gGameConfig->filterBot * (mainGame->cbDuelRule->getSelected() + 1), gGameConfig->lastBot);
-					if(!NetServer::StartServer(host_port))
+					if(!StartHostServer(host_port))
 						break;
 					const auto ip = 0x100007F; //127.0.0.1 in network byte order
 					if(!DuelClient::StartClient({ &ip, epro::Address::INET }, host_port)) {
@@ -431,12 +436,16 @@ bool MenuHandler::OnEvent(const irr::SEvent& event) {
 				break;
 			}
 			case BUTTON_BOT_ADD: {
+				const bool launching_ai_player = mainGame->gBot.CurrentEngineSelection().kind == LocalAiEngineKind::AI_PLAYER;
 				try {
 					int port = std::stoi(gGameConfig->serverport);
-					if(mainGame->gBot.LaunchSelected(port, mainGame->dInfo.secret.pass))
+					const auto now = mainGame->device->getTimer()->getRealTime();
+					if(mainGame->gBot.LaunchSelected(port, mainGame->dInfo.secret.pass, now))
 						break;
 				} catch(...) {}
-				mainGame->PopupMessage(gDataManager->GetSysString(12122).data());
+				mainGame->PopupMessage(launching_ai_player ? AI_PLAYER_FAILURE_MESSAGE : gDataManager->GetSysString(12122));
+				if(launching_ai_player)
+					mainGame->gBot.deckProperties->setText(AI_PLAYER_FAILURE_MESSAGE.data());
 				break;
 			}
 			case BUTTON_BOT_COPY_COMMAND: {

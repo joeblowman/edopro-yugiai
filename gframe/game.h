@@ -255,6 +255,7 @@ struct host_panel_elements {
 	irr::gui::IGUIWindow* wHostPrepareR;
 	irr::gui::IGUIWindow* wHostPrepareL;
 	WindBotPanel gBot;
+	std::vector<AiPlayerEngineEntry> aiPlayerEngines;
 	irr::gui::IGUIStaticText* stHostCardRule;
 	irr::gui::IGUIButton* btnHostPrepDuelist;
 	irr::gui::IGUIButton* btnHostPrepWindBot;
