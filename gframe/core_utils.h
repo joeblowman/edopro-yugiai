@@ -108,6 +108,17 @@ private:
 };
 using OCG_Duel = void*;
 PacketStream ParseMessages(OCG_Duel duel);
+
+using ResourceRoots = std::vector<epro::path_string>;
+
+struct ScanPolicy {
+	static constexpr int MAX_SCAN_DEPTH = 8;
+	int database_depth = 0;
+	int script_depth = 0;
+};
+
+std::vector<epro::path_string> CollectDatabaseFiles(const ResourceRoots& roots, const ScanPolicy& policy);
+std::vector<epro::path_string> CollectScriptDirectories(const ResourceRoots& roots, const ScanPolicy& policy);
 }
 
 #define HINT_SKILL        200

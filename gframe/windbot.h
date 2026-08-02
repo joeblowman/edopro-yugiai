@@ -83,6 +83,7 @@ struct AiPlayerLaunchArgs {
 struct AiPlayerEngineEntry {
 	std::wstring label;
 	LocalAiEngineKind engine_kind{ LocalAiEngineKind::AI_PLAYER };
+	bool preferred_default{};
 	AiPlayerLaunchArgs launch_args;
 
 	LocalAiLaunchResult Launch(int port, epro::wstringview pass, bool chat, int hand, const wchar_t* overridedeck) const;

@@ -323,6 +323,7 @@ workspace "ygo"
 		bin2c(_OPTIONS["bundled-font"], "gframe/CGUITTFont/bundled_font.cpp")
 	end
 	include "gframe"
+	include "tests"
 	if os.istarget("windows") then
 		include "irrlicht"
 	end

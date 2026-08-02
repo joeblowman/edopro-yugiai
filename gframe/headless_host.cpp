@@ -30,6 +30,7 @@
 #include <nlohmann/json.hpp>
 
 #include "bufferio.h"
+#include "core_utils.h"
 #include "data_manager.h"
 #include "deck_manager.h"
 #include "dllinterface.h"
@@ -43,6 +44,9 @@ namespace {
 constexpr size_t kRoomNameLimit = 19;
 constexpr size_t kRoomPasswordLimit = 19;
 constexpr size_t kRoomNotesLimit = 199;
+constexpr int kHeadlessExpansionDbScanDepth = 2;
+constexpr int kHeadlessExpansionScriptScanDepth = 1;
+constexpr int kHeadlessBaseScriptScanDepth = 1;
 
 #if !defined(_WIN32)
 volatile sig_atomic_t g_termination_requested = 0;
@@ -428,17 +432,44 @@ HeadlessRuntimeState& headlessRuntimeState() {
 void populateHeadlessScriptDirectories(HeadlessRuntimeState& state) {
 	state.script_dirs.clear();
 	state.init_scripts.clear();
+	size_t total_script_discovered = 0;
+	size_t total_script_inserted = 0;
+	size_t total_script_duplicate_skipped = 0;
+	auto contains_script_dir = [&state](const epro::path_string& candidate) {
+		auto candidate_key = ygo::Utils::ToUpperNoAccents(ygo::Utils::NormalizePath(candidate));
+		return std::any_of(state.script_dirs.begin(), state.script_dirs.end(), [&candidate_key](const epro::path_string& current) {
+			return ygo::Utils::ToUpperNoAccents(ygo::Utils::NormalizePath(current)) == candidate_key;
+		});
+	};
+	auto append_unique_with_stats = [&](std::vector<epro::path_string>&& dirs) {
+		total_script_discovered += dirs.size();
+		for(auto& dir : dirs) {
+			if(contains_script_dir(dir)) {
+				++total_script_duplicate_skipped;
+				continue;
+			}
+			state.script_dirs.push_back(std::move(dir));
+			++total_script_inserted;
+		}
+	};
 
 	if(ygo::Utils::FileExists(EPRO_TEXT("./init.lua")))
 		state.init_scripts.push_back(EPRO_TEXT("./init.lua"));
 
-	state.script_dirs.push_back(EPRO_TEXT("./expansions/script/"));
-	auto expansion_subdirs = ygo::Utils::FindSubfolders(EPRO_TEXT("./expansions/script/"));
-	state.script_dirs.insert(state.script_dirs.end(), std::make_move_iterator(expansion_subdirs.begin()), std::make_move_iterator(expansion_subdirs.end()));
+	CoreUtils::ScanPolicy expansion_scan_policy{};
+	expansion_scan_policy.script_depth = kHeadlessExpansionScriptScanDepth;
+	auto expansion_script_dirs = CoreUtils::CollectScriptDirectories({ EPRO_TEXT("./expansions/script/") }, expansion_scan_policy);
+	append_unique_with_stats(std::move(expansion_script_dirs));
 
-	state.script_dirs.push_back(EPRO_TEXT("./script/"));
-	auto script_subdirs = ygo::Utils::FindSubfolders(EPRO_TEXT("./script/"));
-	state.script_dirs.insert(state.script_dirs.end(), std::make_move_iterator(script_subdirs.begin()), std::make_move_iterator(script_subdirs.end()));
+	CoreUtils::ScanPolicy base_scan_policy{};
+	base_scan_policy.script_depth = kHeadlessBaseScriptScanDepth;
+	auto base_script_dirs = CoreUtils::CollectScriptDirectories({ EPRO_TEXT("./script/") }, base_scan_policy);
+	append_unique_with_stats(std::move(base_script_dirs));
+
+	epro::print("[INFO][resource-script] phase=headless-base discovered={} inserted={} duplicate_path_skipped={}\n",
+				total_script_discovered,
+				total_script_inserted,
+				total_script_duplicate_skipped);
 }
 
 epro::path_string findHeadlessScriptPath(const HeadlessRuntimeState& state, epro::path_stringview name) {
@@ -491,14 +522,29 @@ void headlessCoreMessageHandler(void*, const char* string, int type) {
 bool loadHeadlessDatabases() {
 	if(!ygo::gDataManager)
 		return false;
+	size_t total_db_discovered = 0;
+	size_t total_db_loaded = 0;
+	size_t total_db_duplicate_skipped = 0;
 
-	if(ygo::Utils::FileExists(EPRO_TEXT("./cards.cdb")))
-		ygo::gDataManager->LoadDB(EPRO_TEXT("./cards.cdb"));
-
-	for(auto& file : ygo::Utils::FindFiles(EPRO_TEXT("./expansions/"), { EPRO_TEXT("cdb") }, 2)) {
-		epro::path_string db = EPRO_TEXT("./expansions/") + file;
-		ygo::gDataManager->LoadDB(db);
+	if(ygo::Utils::FileExists(EPRO_TEXT("./cards.cdb"))) {
+		++total_db_discovered;
+		if(ygo::gDataManager->LoadDB(EPRO_TEXT("./cards.cdb")))
+			++total_db_loaded;
 	}
+
+	CoreUtils::ScanPolicy scan_policy{};
+	scan_policy.database_depth = kHeadlessExpansionDbScanDepth;
+	auto db_files = CoreUtils::CollectDatabaseFiles({ EPRO_TEXT("./expansions/") }, scan_policy);
+	total_db_discovered += db_files.size();
+	for(auto& db : db_files) {
+		if(ygo::gDataManager->LoadDB(db))
+			++total_db_loaded;
+	}
+
+	epro::print("[INFO][resource-db] phase=headless discovered={} loaded={} duplicate_path_skipped={}\n",
+				total_db_discovered,
+				total_db_loaded,
+				total_db_duplicate_skipped);
 
 	return true;
 }

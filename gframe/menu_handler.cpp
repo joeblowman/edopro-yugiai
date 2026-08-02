@@ -1045,12 +1045,13 @@ bool MenuHandler::OnEvent(const irr::SEvent& event) {
 				break;
 			}
 			case COMBOBOX_BOT_DECK: {
-				gGameConfig->lastBot = mainGame->gBot.CurrentIndex();
 				mainGame->gBot.UpdateEngine();
+				gGameConfig->lastBot = EncodeLocalAiEngineSelectionForConfig(mainGame->gBot.CurrentEngineSelection());
 				break;
 			}
 			case COMBOBOX_BOT_ENGINE: {
 				mainGame->gBot.UpdateDescription();
+				gGameConfig->lastBot = EncodeLocalAiEngineSelectionForConfig(mainGame->gBot.CurrentEngineSelection());
 				break;
 			}
 			case SERVER_CHOICE: {

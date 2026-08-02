@@ -1,8 +1,10 @@
 #ifndef WINDBOT_PANEL_H
 #define WINDBOT_PANEL_H
 
+#include <algorithm>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <string_view>
 #include <vector>
 #include "windbot.h"
@@ -50,6 +52,72 @@ static_assert(DecodeLocalAiEngineItemData(0).kind == LocalAiEngineKind::WINDBOT)
 static_assert(DecodeLocalAiEngineItemData(42).index == 42);
 static_assert(DecodeLocalAiEngineItemData(EncodeAiPlayerEngineItemData(42)).kind == LocalAiEngineKind::AI_PLAYER);
 static_assert(DecodeLocalAiEngineItemData(EncodeAiPlayerEngineItemData(42)).index == 42);
+
+constexpr int EncodeLocalAiEngineSelectionForConfig(const LocalAiEngineSelection& selection) {
+	if(!selection.valid)
+		return 0;
+	if(selection.kind == LocalAiEngineKind::AI_PLAYER)
+		return static_cast<int>(EncodeAiPlayerEngineItemData(selection.index));
+	return static_cast<int>(selection.index);
+}
+
+constexpr LocalAiEngineSelection DecodeLocalAiEngineSelectionFromConfig(int saved_selection) {
+	if(saved_selection >= 0)
+		return { LocalAiEngineKind::WINDBOT, static_cast<uint32_t>(saved_selection), true };
+	return DecodeLocalAiEngineItemData(static_cast<uint32_t>(saved_selection));
+}
+
+inline bool IsValidLocalAiEngineSelection(const LocalAiEngineSelection& selection,
+	                                      const std::vector<uint32_t>& available_windbot_indices,
+	                                      size_t available_ai_player_count) {
+	if(!selection.valid)
+		return false;
+	if(selection.kind == LocalAiEngineKind::AI_PLAYER)
+		return selection.index < available_ai_player_count;
+	return std::find(available_windbot_indices.begin(), available_windbot_indices.end(), selection.index)
+		!= available_windbot_indices.end();
+}
+
+struct PreferredAiPlayerSelection {
+	std::optional<uint32_t> index;
+	bool multiple{};
+};
+
+inline PreferredAiPlayerSelection FindPreferredAiPlayerSelection(const std::vector<AiPlayerEngineEntry>* ai_players) {
+	if(!ai_players)
+		return {};
+	PreferredAiPlayerSelection preferred{};
+	for(uint32_t index = 0; index < ai_players->size(); ++index) {
+		if(!(*ai_players)[index].preferred_default)
+			continue;
+		if(!preferred.index.has_value())
+			preferred.index = index;
+		else
+			preferred.multiple = true;
+	}
+	return preferred;
+}
+
+inline LocalAiEngineSelection ResolveLocalAiDefaultEngineSelection(
+	const std::vector<uint32_t>& available_windbot_indices,
+	size_t available_ai_player_count,
+	std::optional<uint32_t> preferred_ai_player,
+	int saved_selection) {
+	if(preferred_ai_player.has_value() && preferred_ai_player.value() < available_ai_player_count)
+		return { LocalAiEngineKind::AI_PLAYER, preferred_ai_player.value(), true };
+
+	const auto decoded_saved = DecodeLocalAiEngineSelectionFromConfig(saved_selection);
+	if(IsValidLocalAiEngineSelection(decoded_saved, available_windbot_indices, available_ai_player_count))
+		return decoded_saved;
+
+	if(!available_windbot_indices.empty())
+		return { LocalAiEngineKind::WINDBOT, available_windbot_indices.front(), true };
+
+	if(available_ai_player_count > 0)
+		return { LocalAiEngineKind::AI_PLAYER, 0u, true };
+
+	return {};
+}
 
 inline constexpr uint32_t AI_PLAYER_JOIN_TIMEOUT_MS = 15000;
 inline constexpr std::wstring_view AI_PLAYER_FAILURE_MESSAGE =

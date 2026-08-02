@@ -2,8 +2,36 @@
 #include "bufferio.h"
 #include "dllinterface.h"
 #include "common.h"
+#include "utils.h"
+
+#include <unordered_set>
 
 namespace CoreUtils {
+
+namespace {
+
+int ClampScanDepth(int depth) {
+	if(depth < 0)
+		return 0;
+	if(depth > ScanPolicy::MAX_SCAN_DEPTH)
+		return ScanPolicy::MAX_SCAN_DEPTH;
+	return depth;
+}
+
+epro::path_string NormalizeRoot(epro::path_stringview root) {
+	return ygo::Utils::NormalizePath(root);
+}
+
+epro::path_string NormalizePathKey(epro::path_stringview path) {
+	return ygo::Utils::ToUpperNoAccents(ygo::Utils::NormalizePath(path, false));
+}
+
+template<typename T>
+void SortCaseInsensitive(std::vector<T>& values) {
+	std::sort(values.begin(), values.end(), ygo::Utils::CompareIgnoreCase<T>);
+}
+
+}
 
 #define PARSE_EXPLICIT(value, type) do {value = BufferIO::Read<type>(current);} while(0); break
 #define PARSE(value) PARSE_EXPLICIT(value, decltype(value))
@@ -312,6 +340,45 @@ PacketStream ParseMessages(OCG_Duel duel) {
 	if(message_len)
 		return PacketStream{ msg, message_len };
 	return PacketStream{};
+}
+
+std::vector<epro::path_string> CollectDatabaseFiles(const ResourceRoots& roots, const ScanPolicy& policy) {
+	std::vector<epro::path_string> results;
+	std::unordered_set<epro::path_string> unique_paths;
+	const int depth = ClampScanDepth(policy.database_depth);
+	for(const auto& root : roots) {
+		const auto normalized_root = NormalizeRoot(root);
+		auto files = ygo::Utils::FindFiles(normalized_root, { EPRO_TEXT("cdb") }, depth);
+		for(auto& file : files) {
+			auto normalized_path = ygo::Utils::NormalizePath(normalized_root + file, false);
+			if(unique_paths.emplace(NormalizePathKey(normalized_path)).second)
+				results.emplace_back(std::move(normalized_path));
+		}
+	}
+	SortCaseInsensitive(results);
+	return results;
+}
+
+std::vector<epro::path_string> CollectScriptDirectories(const ResourceRoots& roots, const ScanPolicy& policy) {
+	std::vector<epro::path_string> results;
+	std::unordered_set<epro::path_string> unique_paths;
+	const int depth = ClampScanDepth(policy.script_depth);
+	for(const auto& root : roots) {
+		const auto normalized_root = NormalizeRoot(root);
+		auto try_insert = [&](const epro::path_string& folder) {
+			auto normalized_folder = ygo::Utils::NormalizePath(folder);
+			if(unique_paths.emplace(NormalizePathKey(normalized_folder)).second)
+				results.emplace_back(std::move(normalized_folder));
+		};
+		try_insert(normalized_root);
+		if(depth > 0) {
+			auto subfolders = ygo::Utils::FindSubfolders(normalized_root, depth, true);
+			for(auto& folder : subfolders)
+				try_insert(folder);
+		}
+	}
+	SortCaseInsensitive(results);
+	return results;
 }
 
 void QueryStream::Parse(const uint8_t* buff, bool legacy_race_size) {

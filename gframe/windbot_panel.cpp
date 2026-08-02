@@ -6,8 +6,25 @@
 #include "data_manager.h"
 #include "deck_manager.h"
 #include "fmt.h"
+#include "logging.h"
 
 namespace ygo {
+
+namespace {
+constexpr std::wstring_view kAiPlayerHostVisibleFailureMessage =
+	L"AI-player launch failed: process exited or did not join within 15s. Host seat remains open.";
+
+const char* AiPlayerPendingFailureReason(AiPlayerPendingDecision decision) {
+	switch(decision) {
+	case AiPlayerPendingDecision::PROCESS_EXITED:
+		return "process exited before joining";
+	case AiPlayerPendingDecision::TIMED_OUT:
+		return "join timed out after 15s";
+	default:
+		return "unknown";
+	}
+}
+}
 
 WindBotPanel::~WindBotPanel() {
 	ClearAiPlayerProcesses();
@@ -34,10 +51,11 @@ LocalAiEngineSelection WindBotPanel::CurrentEngineSelection() {
 
 void WindBotPanel::Refresh(int filterMasterRule, int lastIndex) {
 	int oldIndex = CurrentIndex();
-	int lastBot = oldIndex >= 0 ? oldIndex : lastIndex;
+	int lastDeckIndex = oldIndex >= 0 ? oldIndex : (lastIndex >= 0 ? lastIndex : -1);
 	cbBotDeck->clear();
 	cbBotEngine->clear();
 	genericEngineIdx = -1;
+	std::vector<uint32_t> availableWindBotIndices{};
 	int i = 0;
 	for (const auto& bot : bots) {
 		if(genericEngine == &bot)
@@ -45,15 +63,20 @@ void WindBotPanel::Refresh(int filterMasterRule, int lastIndex) {
 		if (filterMasterRule == 0 || bot.masterRules.find(filterMasterRule) != bot.masterRules.end()) {
 			int newIndex = cbBotDeck->addItem(bot.name.data(), i);
 			cbBotEngine->addItem(bot.name.data(), i);
-			if(i == lastBot) {
+			availableWindBotIndices.push_back(static_cast<uint32_t>(i));
+			if(i == lastDeckIndex) {
 				cbBotDeck->setSelected(newIndex);
-				cbBotEngine->setSelected(newIndex);
 			}
 		}
 		++i;
 	}
 	if(genericEngine) {
 		genericEngineIdx = cbBotEngine->addItem(genericEngine->name.data(), i);
+		availableWindBotIndices.push_back(static_cast<uint32_t>(i));
+	}
+	const auto preferred_ai = FindPreferredAiPlayerSelection(aiPlayerEngines);
+	if(preferred_ai.multiple) {
+		ErrorLog("Multiple AI players are configured with preferredDefault=true; selecting the first valid entry.");
 	}
 	if(aiPlayerEngines) {
 		for(uint32_t aiPlayerIndex = 0; aiPlayerIndex < aiPlayerEngines->size(); ++aiPlayerIndex) {
@@ -61,6 +84,24 @@ void WindBotPanel::Refresh(int filterMasterRule, int lastIndex) {
 			cbBotEngine->addItem(aiPlayer.label.data(), EncodeAiPlayerEngineItemData(aiPlayerIndex));
 		}
 	}
+
+	const auto resolved_engine = ResolveLocalAiDefaultEngineSelection(
+		availableWindBotIndices,
+		aiPlayerEngines ? aiPlayerEngines->size() : 0,
+		preferred_ai.index,
+		lastIndex);
+	if(resolved_engine.valid) {
+		const auto resolved_data = resolved_engine.kind == LocalAiEngineKind::AI_PLAYER
+			? EncodeAiPlayerEngineItemData(resolved_engine.index)
+			: resolved_engine.index;
+		for(irr::u32 engine_item = 0; engine_item < cbBotEngine->getItemCount(); ++engine_item) {
+			if(cbBotEngine->getItemData(engine_item) == resolved_data) {
+				cbBotEngine->setSelected(static_cast<int>(engine_item));
+				break;
+			}
+		}
+	}
+
 	for(auto& file : Utils::FindFiles(DeckManager::GetDeckFolder(), { EPRO_TEXT("ydk") })) {
 		file.erase(file.size() - 4);
 		cbBotDeck->addItem(Utils::ToUnicodeIfNeeded(file).data(), i);
@@ -124,8 +165,10 @@ bool WindBotPanel::LaunchSelected(int port, epro::wstringview pass, uint32_t now
 
 	int index = CurrentIndex();
 	if(selection.kind == LocalAiEngineKind::AI_PLAYER) {
-		if(!aiPlayerEngines || selection.index >= aiPlayerEngines->size())
+		if(!aiPlayerEngines || selection.index >= aiPlayerEngines->size()) {
+			deckProperties->setText(kAiPlayerHostVisibleFailureMessage.data());
 			return false;
+		}
 
 		const wchar_t* overridedeck = nullptr;
 		std::wstring tmpdeck{};
@@ -147,8 +190,10 @@ bool WindBotPanel::LaunchSelected(int port, epro::wstringview pass, uint32_t now
 		// 1 = scissors, 2 = rock, 3 = paper
 		const auto result = (*aiPlayerEngines)[selection.index].Launch(
 			port, pass, !chkMute->isChecked(), chkThrowRock->isChecked() * 2, overridedeck);
-		if(!result)
+		if(!result) {
+			deckProperties->setText(kAiPlayerHostVisibleFailureMessage.data());
 			return false;
+		}
 		auto expected_name = (*aiPlayerEngines)[selection.index].launch_args.display_name;
 		// Lobby names are transmitted in a fixed 20-code-unit field (19 + NUL).
 		if(expected_name.size() > 19)
@@ -193,6 +238,7 @@ bool WindBotPanel::UpdatePendingAiPlayers(uint32_t now_ms) {
 			continue;
 		}
 		if(process.observed_failure != AiPlayerPendingDecision::WAITING) {
+			ErrorLog("AI-player launch failure: {}", AiPlayerPendingFailureReason(process.observed_failure));
 			if(process.observed_failure == AiPlayerPendingDecision::TIMED_OUT)
 				process.process_handle.Terminate();
 			else
@@ -210,7 +256,7 @@ bool WindBotPanel::UpdatePendingAiPlayers(uint32_t now_ms) {
 		}
 	}
 	if(failed)
-		deckProperties->setText(AI_PLAYER_FAILURE_MESSAGE.data());
+		deckProperties->setText(kAiPlayerHostVisibleFailureMessage.data());
 	return failed;
 }
 

@@ -33,6 +33,7 @@
 #include "CGUITTFont/CGUITTFont.h"
 #include "CGUIImageButton/CGUIImageButton.h"
 #include "logging.h"
+#include "core_utils.h"
 #include "utils_gui.h"
 #include "custom_skin_enum.h"
 #include "joystick_wrapper.h"
@@ -63,14 +64,80 @@ constexpr float CARD_IMG_WRAPPER_ASPECT_RATIO = ((float)CARD_IMG_WRAPPER_WIDTH) 
 uint16_t PRO_VERSION = 0x1354;
 
 namespace {
+constexpr int REPO_DB_SCAN_DEPTH = 3;
+constexpr int REPO_SCRIPT_SCAN_DEPTH = 3;
+constexpr int EXPANSION_SCRIPT_SCAN_DEPTH = 1;
+constexpr int BASE_SCRIPT_SCAN_DEPTH = 1;
+
 template<typename T>
 inline T AlignElementWithParent(T elem) {
 	elem->setAlignment(irr::gui::EGUIA_SCALE, irr::gui::EGUIA_SCALE, irr::gui::EGUIA_SCALE, irr::gui::EGUIA_SCALE);
 	return elem;
 }
+
+epro::path_string MakePathKey(epro::path_stringview path) {
+	return ygo::Utils::ToUpperNoAccents(ygo::Utils::NormalizePath(path));
+}
+
+bool ContainsPath(const std::vector<epro::path_string>& paths, epro::path_stringview candidate) {
+	auto candidate_key = MakePathKey(candidate);
+	return std::any_of(paths.begin(), paths.end(), [&candidate_key](const epro::path_string& current) {
+		return MakePathKey(current) == candidate_key;
+	});
+}
+
+void AppendUniquePaths(std::vector<epro::path_string>& destination, std::vector<epro::path_string> paths) {
+	for(auto& path : paths) {
+		if(!ContainsPath(destination, path))
+			destination.push_back(std::move(path));
+	}
+}
+
+struct UniquePathInsertStats {
+	size_t inserted = 0;
+	size_t duplicate_skipped = 0;
+};
+
+UniquePathInsertStats AppendUniquePathsWithStats(std::vector<epro::path_string>& destination, std::vector<epro::path_string> paths) {
+	UniquePathInsertStats stats{};
+	for(auto& path : paths) {
+		if(!ContainsPath(destination, path)) {
+			destination.push_back(std::move(path));
+			++stats.inserted;
+		} else {
+			++stats.duplicate_skipped;
+		}
+	}
+	return stats;
+}
+
+void PrependUniquePaths(std::vector<epro::path_string>& destination, std::vector<epro::path_string> paths) {
+	for(auto it = paths.rbegin(); it != paths.rend(); ++it) {
+		if(!ContainsPath(destination, *it))
+			destination.insert(destination.begin(), std::move(*it));
+	}
+}
+
+UniquePathInsertStats PrependUniquePathsWithStats(std::vector<epro::path_string>& destination, std::vector<epro::path_string> paths) {
+	UniquePathInsertStats stats{};
+	for(auto it = paths.rbegin(); it != paths.rend(); ++it) {
+		if(!ContainsPath(destination, *it)) {
+			destination.insert(destination.begin(), std::move(*it));
+			++stats.inserted;
+		} else {
+			++stats.duplicate_skipped;
+		}
+	}
+	return stats;
+}
 }
 
 namespace ygo {
+
+namespace {
+constexpr std::wstring_view kAiPlayerHostVisibleFailureMessage =
+	L"AI-player launch failed: process exited or did not join within 15s. Host seat remains open.";
+}
 
 #if EDOPRO_ANDROID || EDOPRO_IOS
 #define AddComboBox(env, ...) irr::gui::CGUICustomComboBox::addCustomComboBox(env, __VA_ARGS__)
@@ -2091,7 +2158,7 @@ bool Game::MainLoop() {
 		driver->beginScene(true, true, irr::video::SColor(0, 0, 0, 0));
 		gMutex.lock();
 		if(gBot.UpdatePendingAiPlayers(now))
-			PopupMessage(AI_PLAYER_FAILURE_MESSAGE);
+			PopupMessage(kAiPlayerHostVisibleFailureMessage, L"AI-player launch failure");
 		if(dInfo.isInDuel) {
 			if(dInfo.isReplay)
 				discord.UpdatePresence(DiscordWrapper::REPLAY);
@@ -2597,6 +2664,13 @@ void Game::RefreshAiDecks() {
 					if(entry.launch_args.protocol_version == 0)
 						throw std::invalid_argument("protocolVersion must be greater than zero");
 
+					const auto preferred_default = obj.find("preferredDefault");
+					if(preferred_default != obj.end()) {
+						if(!preferred_default->is_boolean())
+							throw std::invalid_argument("preferredDefault must be a boolean");
+						entry.preferred_default = preferred_default->get<bool>();
+					}
+
 					aiPlayerEngines.push_back(std::move(entry));
 				}
 				catch(const std::exception& e) {
@@ -2743,25 +2817,35 @@ void Game::ParseGithubRepositories(const std::vector<const GitRepo*>& repos) {
 	if(repos.empty())
 		return;
 	bool refresh_db = false;
+	size_t total_db_discovered = 0;
+	size_t total_db_loaded = 0;
+	size_t total_db_duplicate_skipped = 0;
 	for(auto& repo : repos) {
 		auto grepo = &repoInfoGui[repo->repo_path];
 		UpdateRepoInfo(repo, grepo);
 		auto data_path = Utils::ToPathString(repo->data_path);
-		auto files = Utils::FindFiles(data_path, { EPRO_TEXT("cdb") }, 0);
+		CoreUtils::ScanPolicy scan_policy{};
+		scan_policy.database_depth = REPO_DB_SCAN_DEPTH;
+		auto files = CoreUtils::CollectDatabaseFiles({ data_path }, scan_policy);
+		total_db_discovered += files.size();
 		if(!repo->is_language) {
-			for(auto& file : files) {
-				const auto db_path = data_path + file;
+			for(auto& db_path : files) {
 				if(gDataManager->LoadDB(db_path)) {
 					WindBot::AddDatabase(db_path);
 					refresh_db = true;
+					++total_db_loaded;
 				}
 			}
 			gDataManager->LoadStrings(data_path + EPRO_TEXT("strings.conf"));
 			refresh_db = gDataManager->LoadIdsMapping(data_path + EPRO_TEXT("mappings.json")) || refresh_db;
 		} else {
 			if(Utils::ToUTF8IfNeeded(gGameConfig->locale) == repo->language) {
-				for(auto& file : files)
-					refresh_db = gDataManager->LoadLocaleDB(data_path + file) || refresh_db;
+				for(auto& db_path : files) {
+					auto loaded = gDataManager->LoadLocaleDB(db_path);
+					refresh_db = loaded || refresh_db;
+					if(loaded)
+						++total_db_loaded;
+				}
 				gDataManager->LoadLocaleStrings(data_path + EPRO_TEXT("strings.conf"));
 			}
 			auto langpath = Utils::ToPathString(repo->language);
@@ -2779,6 +2863,10 @@ void Game::ParseGithubRepositories(const std::vector<const GitRepo*>& repos) {
 			}
 		}
 	}
+	epro::print("[INFO][resource-db] phase=game-repos discovered={} loaded={} duplicate_path_skipped={}\n",
+				total_db_discovered,
+				total_db_loaded,
+				total_db_duplicate_skipped);
 	if(refresh_db && is_building) {
 		if(!is_siding)
 			deckBuilder.RefreshCurrentDeck();
@@ -2840,12 +2928,14 @@ void Game::UpdateRepoInfo(const GitRepo* repo, RepoGui* grepo) {
 	grepo->history_button1->setEnabled(true);
 	grepo->history_button2->setEnabled(true);
 	if(!repo->is_language) {
-		script_dirs.insert(script_dirs.begin(), Utils::ToPathString(repo->script_path));
-		auto init_script = epro::format(EPRO_TEXT("{}{}"), script_dirs.front(), EPRO_TEXT("init.lua"));
+		auto repo_script_root = Utils::NormalizePath(Utils::ToPathString(repo->script_path));
+		auto init_script = epro::format(EPRO_TEXT("{}{}"), repo_script_root, EPRO_TEXT("init.lua"));
 		if(Utils::FileExists(init_script))
 			init_scripts.push_back(std::move(init_script));
-		auto script_subdirs = Utils::FindSubfolders(Utils::ToPathString(repo->script_path), 2);
-		script_dirs.insert(script_dirs.begin(), std::make_move_iterator(script_subdirs.begin()), std::make_move_iterator(script_subdirs.end()));
+		CoreUtils::ScanPolicy scan_policy{};
+		scan_policy.script_depth = REPO_SCRIPT_SCAN_DEPTH;
+		auto repo_script_dirs = CoreUtils::CollectScriptDirectories({ repo_script_root }, scan_policy);
+		PrependUniquePathsWithStats(script_dirs, std::move(repo_script_dirs));
 		pic_dirs.insert(pic_dirs.begin(), Utils::ToPathString(repo->pics_path));
 		if(repo->has_core)
 			cores_to_load.insert(cores_to_load.begin(), Utils::ToPathString(repo->core_path));
@@ -4056,13 +4146,28 @@ void Game::UpdateUnzipBar(unzip_payload* payload) {
 void Game::PopulateResourcesDirectories() {
 	if(Utils::FileExists(EPRO_TEXT("./init.lua")))
 		init_scripts.push_back(EPRO_TEXT("./init.lua"));
-	script_dirs.push_back(EPRO_TEXT("./expansions/script/"));
-	auto expansions_subdirs = Utils::FindSubfolders(EPRO_TEXT("./expansions/script/"));
-	script_dirs.insert(script_dirs.end(), std::make_move_iterator(expansions_subdirs.begin()), std::make_move_iterator(expansions_subdirs.end()));
+	size_t total_script_discovered = 0;
+	size_t total_script_inserted = 0;
+	size_t total_script_duplicate_skipped = 0;
+	CoreUtils::ScanPolicy expansions_scan_policy{};
+	expansions_scan_policy.script_depth = EXPANSION_SCRIPT_SCAN_DEPTH;
+	auto expansion_script_dirs = CoreUtils::CollectScriptDirectories({ EPRO_TEXT("./expansions/script/") }, expansions_scan_policy);
+	total_script_discovered += expansion_script_dirs.size();
+	auto expansion_stats = AppendUniquePathsWithStats(script_dirs, std::move(expansion_script_dirs));
+	total_script_inserted += expansion_stats.inserted;
+	total_script_duplicate_skipped += expansion_stats.duplicate_skipped;
 	script_dirs.push_back(EPRO_TEXT("archives"));
-	script_dirs.push_back(EPRO_TEXT("./script/"));
-	auto script_subdirs = Utils::FindSubfolders(EPRO_TEXT("./script/"));
-	script_dirs.insert(script_dirs.end(), std::make_move_iterator(script_subdirs.begin()), std::make_move_iterator(script_subdirs.end()));
+	CoreUtils::ScanPolicy base_scan_policy{};
+	base_scan_policy.script_depth = BASE_SCRIPT_SCAN_DEPTH;
+	auto base_script_dirs = CoreUtils::CollectScriptDirectories({ EPRO_TEXT("./script/") }, base_scan_policy);
+	total_script_discovered += base_script_dirs.size();
+	auto base_stats = AppendUniquePathsWithStats(script_dirs, std::move(base_script_dirs));
+	total_script_inserted += base_stats.inserted;
+	total_script_duplicate_skipped += base_stats.duplicate_skipped;
+	epro::print("[INFO][resource-script] phase=game-base discovered={} inserted={} duplicate_path_skipped={}\n",
+				total_script_discovered,
+				total_script_inserted,
+				total_script_duplicate_skipped);
 	pic_dirs.push_back(EPRO_TEXT("./expansions/pics/"));
 	pic_dirs.push_back(EPRO_TEXT("archives"));
 	pic_dirs.push_back(EPRO_TEXT("./pics/"));

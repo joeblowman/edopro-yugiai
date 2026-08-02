@@ -2,6 +2,7 @@
 #include <irrlicht.h>
 #include "config.h"
 #include "cli_args.h"
+#include "core_utils.h"
 #include "utils_gui.h"
 #include "deck_manager.h"
 #include "replay.h"
@@ -26,15 +27,31 @@
 namespace ygo {
 
 void DataHandler::LoadDatabases() {
+	size_t total_db_discovered = 0;
+	size_t total_db_loaded = 0;
+	size_t total_db_duplicate_skipped = 0;
 	if(Utils::FileExists(EPRO_TEXT("./cards.cdb"))) {
-		if(dataManager->LoadDB(EPRO_TEXT("./cards.cdb")))
+		++total_db_discovered;
+		auto loaded = dataManager->LoadDB(EPRO_TEXT("./cards.cdb"));
+		if(loaded) {
+			++total_db_loaded;
 			WindBot::AddDatabase(EPRO_TEXT("./cards.cdb"));
+		}
 	}
-	for(auto& file : Utils::FindFiles(EPRO_TEXT("./expansions/"), { EPRO_TEXT("cdb") }, 2)) {
-		epro::path_string db = EPRO_TEXT("./expansions/") + file;
-		if(dataManager->LoadDB(db))
+	CoreUtils::ScanPolicy scan_policy{};
+	scan_policy.database_depth = 2;
+	auto db_files = CoreUtils::CollectDatabaseFiles({ EPRO_TEXT("./expansions/") }, scan_policy);
+	total_db_discovered += db_files.size();
+	for(auto& db : db_files) {
+		if(dataManager->LoadDB(db)) {
+			++total_db_loaded;
 			WindBot::AddDatabase(db);
+		}
 	}
+	epro::print("[INFO][resource-db] phase=data-handler discovered={} loaded={} duplicate_path_skipped={}\n",
+				total_db_discovered,
+				total_db_loaded,
+				total_db_duplicate_skipped);
 	LoadArchivesDB();
 }
 void DataHandler::LoadArchivesDB() {
